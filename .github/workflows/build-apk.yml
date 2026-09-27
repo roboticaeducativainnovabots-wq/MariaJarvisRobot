@@ -21,6 +21,19 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Prepare Spanish Vosk model
+        run: |
+          rm -rf app/src/main/assets/model-es
+          mkdir -p app/src/main/assets
+          curl -L --fail --retry 3 --retry-delay 2 \
+            -o /tmp/vosk-es.zip \
+            https://alphacephei.com/vosk/models/vosk-model-small-es-0.42.zip
+          rm -rf /tmp/vosk-es
+          mkdir -p /tmp/vosk-es
+          unzip -q /tmp/vosk-es.zip -d /tmp/vosk-es
+          mv /tmp/vosk-es/vosk-model-small-es-0.42 app/src/main/assets/model-es
+          printf 'maria-vosk-es-0.42-v1\n' > app/src/main/assets/model-es/uuid
+
       - name: Install Android 35
         run: |
           SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
