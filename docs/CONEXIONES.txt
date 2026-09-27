@@ -1,0 +1,21 @@
+CONEXIONES ESP32 -> L298N
+========================
+ESP32 GPIO25 -> ENA
+ESP32 GPIO26 -> IN1
+ESP32 GPIO27 -> IN2
+ESP32 GPIO14 -> ENB
+ESP32 GPIO32 -> IN3
+ESP32 GPIO33 -> IN4
+ESP32 GND    -> GND del L298N
+
+L298N OUT1 / OUT2 -> Motor izquierdo
+L298N OUT3 / OUT4 -> Motor derecho
+
+ALIMENTACIÓN RECOMENDADA
+========================
+- Motores: batería adecuada para tus motores conectada a +12V/VIN y GND del L298N.
+- ESP32: aliméntalo por USB/power-bank o con un regulador de 5 V estable.
+- MUY IMPORTANTE: une GND del ESP32 con GND del L298N.
+- No alimentes los motores desde el pin 5V/3V3 del ESP32.
+- Evita la pila rectangular de 9 V: normalmente no entrega corriente suficiente para dos motores.
+- Si el L298N tiene jumpers ENA/ENB, RETÍRALOS porque ENA y ENB serán controlados por PWM desde el ESP32.
