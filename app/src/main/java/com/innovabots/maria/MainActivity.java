@@ -240,12 +240,20 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 status.setText("Pensando...");
             }
             @Override public void onError(int error) {
-                if (error == 12) {
-                    status.setText("Voz en español no disponible. Instala Español (México) sin conexión o usa texto.");
+                if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED) {
+                    status.setText("Español (México) no está soportado por el reconocedor. Intentaré el idioma del teléfono.");
+                    startListeningSystemLanguage();
+                } else if (Build.VERSION.SDK_INT >= 31 && error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE) {
+                    status.setText("El modelo de voz no está descargado. Intentaré reconocimiento por Internet.");
+                    startListeningSystemLanguage();
                 } else if (error == SpeechRecognizer.ERROR_NO_MATCH) {
                     status.setText("No entendí. Toca Hablar e inténtalo otra vez.");
+                } else if (error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
+                    status.setText("No escuché tu voz. Acércate al micrófono y vuelve a tocar Hablar.");
+                } else if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
+                    status.setText("María necesita permiso de micrófono. Actívalo en Ajustes > Aplicaciones > María Robot > Permisos.");
                 } else {
-                    status.setText("Error de voz: " + error + ". Puedes escribir.");
+                    status.setText("Error de voz: " + error + ". Toca Hablar para intentarlo otra vez.");
                 }
             }
             @Override public void onResults(Bundle results) {
@@ -272,9 +280,33 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-MX");
         i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "es-MX");
-        i.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, true);
+        i.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false);
+        i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
+        i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
         i.putExtra(RecognizerIntent.EXTRA_PROMPT, "Habla con María");
-        recognizer.startListening(i);
+        try {
+            recognizer.cancel();
+            recognizer.startListening(i);
+        } catch (Exception e) {
+            status.setText("No pude iniciar el micrófono. Intenta de nuevo.");
+        }
+    }
+
+    private void startListeningSystemLanguage() {
+        if (recognizer == null) return;
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            try {
+                Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                i.putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, false);
+                i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
+                i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
+                recognizer.cancel();
+                recognizer.startListening(i);
+            } catch (Exception e) {
+                status.setText("Reconocimiento de voz no disponible. Revisa el servicio de voz de Google.");
+            }
+        }, 400);
     }
 
     private String norm(String s) {
