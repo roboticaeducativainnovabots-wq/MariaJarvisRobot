@@ -9,7 +9,6 @@ import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothSocket;
 import android.content.Intent;
 import android.content.pm.PackageManager;
-import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -20,11 +19,15 @@ import android.speech.SpeechRecognizer;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.view.Gravity;
+import android.view.View;
+import android.view.Window;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.Button;
-import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -48,9 +51,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
     private TextToSpeech tts;
     private SpeechRecognizer recognizer;
-    private TextView status;
-    private EditText input;
-    private Button connectButton;
+    private EyesView eyesView;
 
     private BluetoothSocket btSocket;
     private OutputStream btOut;
@@ -63,12 +64,13 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     private volatile String currentMotion = "S";
     private int speed = 190;
 
-    // Escucha manos libres.
     private boolean continuousListening = true;
     private boolean isListening = false;
     private boolean mariaSpeaking = false;
     private boolean activityActive = false;
     private boolean useSystemLanguage = false;
+    private boolean settingsOpen = false;
+    private String lastStatus = "Lista";
 
     private final Runnable heartbeat = new Runnable() {
         @Override public void run() {
@@ -86,183 +88,207 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // El teléfono funciona como la cara de María; mantenemos la pantalla encendida.
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        getWindow().addFlags(
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON |
+                WindowManager.LayoutParams.FLAG_FULLSCREEN
+        );
 
-        buildUi();
+        enterImmersiveMode();
+        buildEyeOnlyUi();
+
         tts = new TextToSpeech(this, this);
         requestNeededPermissions();
         setupSpeechRecognizer();
         heartbeatHandler.postDelayed(heartbeat, 500);
     }
 
+    private void enterImmersiveMode() {
+        Window window = getWindow();
+
+        if (Build.VERSION.SDK_INT >= 30) {
+            window.setDecorFitsSystemWindows(false);
+            WindowInsetsController controller = window.getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                );
+            }
+        } else {
+            window.getDecorView().setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_FULLSCREEN |
+                    View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                    View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+                    View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+                    View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+            );
+        }
+    }
+
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) enterImmersiveMode();
+    }
+
     @Override protected void onResume() {
         super.onResume();
         activityActive = true;
-        scheduleVoiceRestart(900);
+        enterImmersiveMode();
+        scheduleVoiceRestart(800);
     }
 
     @Override protected void onPause() {
         activityActive = false;
         voiceHandler.removeCallbacks(restartVoice);
+
         if (recognizer != null) {
             try { recognizer.cancel(); } catch (Exception ignored) {}
         }
+
         isListening = false;
+        if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
         super.onPause();
     }
 
-    private void buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setGravity(Gravity.CENTER_HORIZONTAL);
-        root.setPadding(dp(14), dp(10), dp(14), dp(10));
-        root.setBackgroundColor(Color.rgb(5, 8, 13));
+    private void buildEyeOnlyUi() {
+        eyesView = new EyesView(this);
+        eyesView.setMode(EyesView.MODE_IDLE);
 
-        EyesView eyes = new EyesView(this);
-        root.addView(eyes, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, dp(250)));
+        // Menú oculto: mantener presionada cualquier parte de la pantalla.
+        eyesView.setOnLongClickListener(v -> {
+            openSettings();
+            return true;
+        });
 
-        TextView title = new TextView(this);
-        title.setText("MARÍA");
-        title.setTextColor(Color.rgb(70, 220, 245));
-        title.setTextSize(30);
-        title.setGravity(Gravity.CENTER);
-        root.addView(title);
+        setContentView(eyesView);
+    }
 
-        status = new TextView(this);
-        status.setText("🎤 Escucha automática activa. Habla con María.");
-        status.setTextColor(Color.WHITE);
-        status.setTextSize(16);
-        status.setGravity(Gravity.CENTER);
-        status.setPadding(dp(8), dp(8), dp(8), dp(10));
-        root.addView(status);
+    private void setStatus(String text) {
+        lastStatus = text == null ? "" : text;
+    }
 
-        connectButton = button("Conectar ESP32");
-        root.addView(connectButton,
-                new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(54)));
+    private void openSettings() {
+        if (settingsOpen) return;
 
-        TextView autoListen = new TextView(this);
-        autoListen.setText("● MANOS LIBRES ACTIVADO — no necesitas tocar un botón");
-        autoListen.setTextColor(Color.rgb(80, 230, 160));
-        autoListen.setGravity(Gravity.CENTER);
-        autoListen.setPadding(dp(4), dp(8), dp(4), dp(8));
-        root.addView(autoListen);
+        settingsOpen = true;
+        voiceHandler.removeCallbacks(restartVoice);
 
-        LinearLayout textRow = row();
-        input = new EditText(this);
-        input.setHint("También puedes escribirle a María...");
-        input.setTextColor(Color.WHITE);
-        input.setHintTextColor(Color.GRAY);
-        input.setSingleLine(true);
-        Button send = button("Enviar");
-        textRow.addView(input, new LinearLayout.LayoutParams(0, dp(54), 3));
-        textRow.addView(send, new LinearLayout.LayoutParams(0, dp(54), 1));
-        root.addView(textRow);
+        if (recognizer != null && isListening) {
+            try { recognizer.cancel(); } catch (Exception ignored) {}
+            isListening = false;
+        }
 
-        TextView speedLabel = new TextView(this);
-        speedLabel.setText("Velocidad motores");
-        speedLabel.setTextColor(Color.LTGRAY);
-        speedLabel.setGravity(Gravity.CENTER);
-        root.addView(speedLabel);
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(24), dp(14), dp(24), dp(8));
+
+        TextView bluetoothState = new TextView(this);
+        bluetoothState.setTextSize(18);
+        bluetoothState.setPadding(0, dp(8), 0, dp(12));
+        bluetoothState.setText(connected
+                ? "ESP32: conectado a " + ROBOT_NAME
+                : "ESP32: desconectado");
+        panel.addView(bluetoothState);
+
+        Button btButton = new Button(this);
+        btButton.setAllCaps(false);
+        btButton.setText(connected ? "Desconectar ESP32" : "Conectar ESP32");
+        panel.addView(btButton);
+
+        TextView speedTitle = new TextView(this);
+        speedTitle.setPadding(0, dp(16), 0, dp(4));
+        speedTitle.setText("Velocidad motores: " + speed);
+        panel.addView(speedTitle);
 
         SeekBar speedBar = new SeekBar(this);
         speedBar.setMax(255);
+        speedBar.setMin(80);
         speedBar.setProgress(speed);
-        root.addView(speedBar);
+        panel.addView(speedBar);
 
-        Button forward = button("▲ ADELANTE");
-        root.addView(forward, new LinearLayout.LayoutParams(dp(210), dp(54)));
+        Switch listenSwitch = new Switch(this);
+        listenSwitch.setText("Escucha automática");
+        listenSwitch.setChecked(continuousListening);
+        listenSwitch.setPadding(0, dp(14), 0, dp(8));
+        panel.addView(listenSwitch);
 
-        LinearLayout mid = row();
-        Button left = button("◀ IZQ");
-        Button stop = button("■ ALTO");
-        Button right = button("DER ▶");
-        mid.addView(left, weight());
-        mid.addView(stop, weight());
-        mid.addView(right, weight());
-        root.addView(mid);
+        TextView hint = new TextView(this);
+        hint.setPadding(0, dp(12), 0, 0);
+        hint.setText(
+                "También puedes decir: “María, abre configuración”, " +
+                "“María, conecta el ESP32” o “María, velocidad 180”."
+        );
+        panel.addView(hint);
 
-        Button back = button("▼ ATRÁS");
-        root.addView(back, new LinearLayout.LayoutParams(dp(210), dp(54)));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("Configuración de María")
+                .setView(panel)
+                .setNegativeButton("Cerrar", null)
+                .create();
 
-        TextView help = new TextView(this);
-        help.setText("Solo habla: “María, avanza”, “María, detente”, “María, qué hora es”.");
-        help.setTextColor(Color.GRAY);
-        help.setGravity(Gravity.CENTER);
-        help.setPadding(dp(5), dp(10), dp(5), 0);
-        root.addView(help);
-
-        setContentView(root);
-
-        connectButton.setOnClickListener(v -> {
+        btButton.setOnClickListener(v -> {
             if (connected) {
                 disconnectRobot();
-                say("ESP32 desconectado.");
+                bluetoothState.setText("ESP32: desconectado");
+                btButton.setText("Conectar ESP32");
             } else {
                 connectRobot();
+                bluetoothState.setText("ESP32: conectando...");
             }
         });
-
-        send.setOnClickListener(v -> {
-            String s = input.getText().toString().trim();
-            if (!s.isEmpty()) {
-                input.setText("");
-                processCommand(s);
-            }
-        });
-
-        forward.setOnClickListener(v -> movement("F", "Voy hacia adelante."));
-        back.setOnClickListener(v -> movement("B", "Voy hacia atrás."));
-        left.setOnClickListener(v -> movement("L", "Girando a la izquierda."));
-        right.setOnClickListener(v -> movement("R", "Girando a la derecha."));
-        stop.setOnClickListener(v -> movement("S", "Me detengo."));
 
         speedBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) {
                 speed = Math.max(80, value);
-                if (connected && fromUser) sendRobot("V" + speed);
+                speedTitle.setText("Velocidad motores: " + speed);
+                if (fromUser && connected) sendRobot("V" + speed);
             }
+
             @Override public void onStartTrackingTouch(SeekBar seekBar) {}
-            @Override public void onStopTrackingTouch(SeekBar seekBar) {
-                say("Velocidad en " + speed);
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {}
+        });
+
+        listenSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            continuousListening = isChecked;
+
+            if (!isChecked) {
+                voiceHandler.removeCallbacks(restartVoice);
+                if (recognizer != null) {
+                    try { recognizer.cancel(); } catch (Exception ignored) {}
+                }
+                isListening = false;
+                eyesView.setMode(EyesView.MODE_IDLE);
             }
         });
+
+        dialog.setOnDismissListener(d -> {
+            settingsOpen = false;
+            enterImmersiveMode();
+            if (continuousListening) scheduleVoiceRestart(350);
+        });
+
+        dialog.show();
     }
 
-    private LinearLayout row() {
-        LinearLayout l = new LinearLayout(this);
-        l.setOrientation(LinearLayout.HORIZONTAL);
-        l.setGravity(Gravity.CENTER);
-        return l;
-    }
-
-    private LinearLayout.LayoutParams weight() {
-        return new LinearLayout.LayoutParams(0, dp(54), 1);
-    }
-
-    private Button button(String text) {
-        Button b = new Button(this);
-        b.setText(text);
-        b.setAllCaps(false);
-        return b;
-    }
-
-    private int dp(int v) {
-        return (int)(v * getResources().getDisplayMetrics().density + 0.5f);
+    private int dp(int value) {
+        return (int)(value * getResources().getDisplayMetrics().density + 0.5f);
     }
 
     private void requestNeededPermissions() {
         ArrayList<String> permissions = new ArrayList<>();
+
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.RECORD_AUDIO);
         }
+
         if (Build.VERSION.SDK_INT >= 31 &&
                 checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT)
                         != PackageManager.PERMISSION_GRANTED) {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
+
         if (!permissions.isEmpty()) {
             requestPermissions(permissions.toArray(new String[0]), REQ_PERMS);
         }
@@ -270,105 +296,119 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
     private void setupSpeechRecognizer() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            status.setText("Reconocimiento de voz no disponible. Revisa el servicio de voz de Google.");
+            setStatus("Reconocimiento de voz no disponible");
+            if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
             return;
         }
 
         recognizer = SpeechRecognizer.createSpeechRecognizer(this);
+
         recognizer.setRecognitionListener(new RecognitionListener() {
             @Override public void onReadyForSpeech(Bundle params) {
                 isListening = true;
-                if (!mariaSpeaking) status.setText("🎤 María está escuchando...");
+                setStatus("Escuchando");
+                if (eyesView != null) eyesView.setMode(EyesView.MODE_LISTENING);
             }
 
             @Override public void onBeginningOfSpeech() {
-                if (!mariaSpeaking) status.setText("🎤 Te escucho...");
+                setStatus("Escuchando voz");
+                if (eyesView != null) eyesView.setMode(EyesView.MODE_LISTENING);
             }
 
-            @Override public void onRmsChanged(float rmsdB) {}
+            @Override public void onRmsChanged(float rmsdB) {
+                if (eyesView != null) eyesView.setVoiceLevel(rmsdB);
+            }
+
             @Override public void onBufferReceived(byte[] buffer) {}
 
             @Override public void onEndOfSpeech() {
                 isListening = false;
-                if (!mariaSpeaking) status.setText("Procesando...");
+                setStatus("Pensando");
+                if (!mariaSpeaking && eyesView != null) {
+                    eyesView.setMode(EyesView.MODE_THINKING);
+                }
             }
 
             @Override public void onError(int error) {
                 isListening = false;
 
-                if (!continuousListening || !activityActive || mariaSpeaking) return;
+                if (settingsOpen || !continuousListening || !activityActive || mariaSpeaking) {
+                    return;
+                }
 
                 if (error == SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED ||
                         (Build.VERSION.SDK_INT >= 31 &&
                                 error == SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE)) {
                     useSystemLanguage = true;
-                    status.setText("🎤 Ajustando idioma de voz...");
+                    setStatus("Ajustando idioma");
                     scheduleVoiceRestart(600);
                     return;
                 }
 
                 if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                    status.setText("Activa el permiso de micrófono para María.");
+                    setStatus("Falta permiso de micrófono");
+                    if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
                     return;
                 }
 
-                // Timeout y NO_MATCH son normales en escucha continua: simplemente vuelve a escuchar.
                 if (error == SpeechRecognizer.ERROR_NO_MATCH ||
                         error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                    status.setText("🎤 María está escuchando...");
-                    scheduleVoiceRestart(250);
+                    setStatus("Escuchando");
+                    if (eyesView != null) eyesView.setMode(EyesView.MODE_LISTENING);
+                    scheduleVoiceRestart(220);
                     return;
                 }
 
-                // Para errores de red/servidor/cliente, espera un poco y reintenta.
-                status.setText("🎤 Reconectando escucha...");
-                scheduleVoiceRestart(1200);
+                setStatus("Reconectando voz");
+                if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
+                scheduleVoiceRestart(1000);
             }
 
             @Override public void onResults(Bundle results) {
                 isListening = false;
+
                 ArrayList<String> list =
                         results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
 
                 if (list != null && !list.isEmpty()) {
                     String heard = list.get(0);
-                    status.setText("Tú: " + heard);
+                    setStatus("Escuché: " + heard);
+                    if (eyesView != null) eyesView.setMode(EyesView.MODE_THINKING);
                     processCommand(heard);
-                } else {
-                    scheduleVoiceRestart(300);
                 }
 
-                // Si el comando no produjo voz (por ejemplo mientras conecta Bluetooth),
-                // continuamos escuchando igualmente.
-                if (!mariaSpeaking) scheduleVoiceRestart(500);
+                if (!mariaSpeaking && !settingsOpen) scheduleVoiceRestart(450);
             }
 
-            @Override public void onPartialResults(Bundle partialResults) {
-                ArrayList<String> list =
-                        partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION);
-                if (list != null && !list.isEmpty() && !mariaSpeaking) {
-                    status.setText("🎤 " + list.get(0));
-                }
-            }
-
+            @Override public void onPartialResults(Bundle partialResults) {}
             @Override public void onEvent(int eventType, Bundle params) {}
         });
     }
 
     private void scheduleVoiceRestart(long delayMs) {
         voiceHandler.removeCallbacks(restartVoice);
-        if (continuousListening && activityActive && !mariaSpeaking) {
+
+        if (continuousListening &&
+                activityActive &&
+                !mariaSpeaking &&
+                !settingsOpen) {
             voiceHandler.postDelayed(restartVoice, delayMs);
         }
     }
 
     private void startListening() {
-        if (!continuousListening || !activityActive || mariaSpeaking || isListening) return;
+        if (!continuousListening ||
+                !activityActive ||
+                mariaSpeaking ||
+                settingsOpen ||
+                isListening) {
+            return;
+        }
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
             requestNeededPermissions();
-            status.setText("María necesita permiso de micrófono.");
+            setStatus("María necesita permiso de micrófono");
             return;
         }
 
@@ -378,8 +418,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
 
         Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
-        i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+        i.putExtra(
+                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
+        );
 
         if (!useSystemLanguage) {
             i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "es-MX");
@@ -390,34 +432,54 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 5);
         i.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true);
         i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 900L);
-        i.putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 650L);
+        i.putExtra(
+                RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS,
+                650L
+        );
 
         try {
             recognizer.startListening(i);
-            status.setText("🎤 María está escuchando...");
+            setStatus("Escuchando");
+            if (eyesView != null) eyesView.setMode(EyesView.MODE_LISTENING);
         } catch (Exception e) {
             isListening = false;
-            status.setText("🎤 Reiniciando micrófono...");
-            scheduleVoiceRestart(1000);
+            setStatus("Reiniciando micrófono");
+            if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
+            scheduleVoiceRestart(900);
         }
     }
 
     private String norm(String s) {
         String n = Normalizer.normalize(
-                s.toLowerCase(Locale.ROOT), Normalizer.Form.NFD);
+                s.toLowerCase(Locale.ROOT),
+                Normalizer.Form.NFD
+        );
         return n.replaceAll("\\p{M}", "");
     }
 
-    private boolean hasAny(String s, String... xs) {
-        for (String x : xs) if (s.contains(x)) return true;
+    private boolean hasAny(String s, String... values) {
+        for (String value : values) {
+            if (s.contains(value)) return true;
+        }
         return false;
     }
 
     private void processCommand(String original) {
         String s = norm(original);
-        status.setText("Tú: " + original);
 
-        // STOP siempre tiene prioridad por seguridad, aunque no diga "María".
+        if (hasAny(
+                s,
+                "abre configuracion",
+                "abrir configuracion",
+                "abre ajustes",
+                "abrir ajustes",
+                "configuracion maria"
+        )) {
+            openSettings();
+            return;
+        }
+
+        // Seguridad: la orden de detener tiene prioridad y no necesita palabra de activación.
         if (hasAny(s, "detente", "alto", "parate", "frena", "stop")) {
             movement("S", "De acuerdo. Me detengo.");
             return;
@@ -454,21 +516,47 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             return;
         }
 
+        if (s.contains("velocidad")) {
+            Integer spokenSpeed = extractNumber(s);
+
+            if (spokenSpeed != null) {
+                speed = Math.max(80, Math.min(255, spokenSpeed));
+
+                if (connected) {
+                    sendRobot("V" + speed);
+                }
+
+                say("Velocidad ajustada a " + speed + ".");
+            } else {
+                say("La velocidad actual es " + speed + " de 255.");
+            }
+            return;
+        }
+
         if (hasAny(s, "que hora es", "dime la hora", "hora actual")) {
-            say("Son las " +
-                    new SimpleDateFormat("h:mm a", new Locale("es", "MX")).format(new Date()));
+            say(
+                    "Son las " +
+                    new SimpleDateFormat(
+                            "h:mm a",
+                            new Locale("es", "MX")
+                    ).format(new Date())
+            );
             return;
         }
 
         if (hasAny(s, "que dia es", "que fecha es", "fecha de hoy")) {
-            say("Hoy es " +
-                    new SimpleDateFormat("EEEE d 'de' MMMM 'de' yyyy",
-                            new Locale("es", "MX")).format(new Date()));
+            say(
+                    "Hoy es " +
+                    new SimpleDateFormat(
+                            "EEEE d 'de' MMMM 'de' yyyy",
+                            new Locale("es", "MX")
+                    ).format(new Date())
+            );
             return;
         }
 
         if (hasAny(s, "como te llamas", "cual es tu nombre", "quien eres")) {
-            say("Me llamo María. Soy tu asistente virtual y puedo controlar tu robot con ESP32.");
+            say("Me llamo María. Soy tu asistente virtual y controlo tu robot.");
             return;
         }
 
@@ -483,7 +571,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
 
         if (hasAny(s, "que puedes hacer", "que sabes hacer", "ayuda")) {
-            say("Puedo escucharte sin botones, hablar contigo, decirte la hora y controlar el robot.");
+            say(
+                    "Puedo escucharte sin botones, controlar el robot, " +
+                    "decirte la hora y abrir mi configuración por voz."
+            );
             return;
         }
 
@@ -493,43 +584,67 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
         }
 
         if (hasAny(s, "gracias", "muchas gracias")) {
-            say("Con gusto. Aquí estoy para ayudarte.");
-            return;
-        }
-
-        if (hasAny(s, "adios", "hasta luego", "nos vemos")) {
-            say("Hasta luego. Seguiré atenta mientras la aplicación esté abierta.");
-            return;
-        }
-
-        if (s.contains("velocidad")) {
-            say("La velocidad actual es " + speed + " de 255.");
+            say("Con gusto.");
             return;
         }
 
         if (s.contains("bluetooth") || s.contains("esp32")) {
-            say(connected
+            say(
+                    connected
                     ? "Estoy conectada al ESP32."
-                    : "Todavía no estoy conectada al ESP32. Empareja MARIA_ROBOT y toca Conectar ESP32.");
+                    : "Todavía no estoy conectada al ESP32."
+            );
             return;
         }
 
-        // Evita responder a sonidos aleatorios muy cortos del ambiente.
-        if (s.trim().length() < 3) {
+        if (s.trim().length() >= 3) {
+            say(
+                    "Te escuché decir: " + original +
+                    ". Mi conversación libre se puede ampliar en una siguiente versión."
+            );
+        } else {
             scheduleVoiceRestart(300);
-            return;
+        }
+    }
+
+    private Integer extractNumber(String text) {
+        String digits = text.replaceAll("[^0-9]", " ").trim();
+
+        if (!digits.isEmpty()) {
+            String[] parts = digits.split("\\s+");
+            try {
+                return Integer.parseInt(parts[0]);
+            } catch (NumberFormatException ignored) {}
         }
 
-        say("Te escuché decir: " + original +
-                ". Esta versión controla el robot y responde conversaciones sencillas.");
+        String[][] words = {
+                {"ochenta", "80"},
+                {"noventa", "90"},
+                {"cien", "100"},
+                {"ciento veinte", "120"},
+                {"ciento cincuenta", "150"},
+                {"ciento ochenta", "180"},
+                {"doscientos", "200"},
+                {"doscientos veinte", "220"},
+                {"doscientos cincuenta", "250"},
+                {"doscientos cincuenta y cinco", "255"}
+        };
+
+        for (String[] pair : words) {
+            if (text.contains(pair[0])) {
+                return Integer.parseInt(pair[1]);
+            }
+        }
+
+        return null;
     }
 
     private void movement(String cmd, String phrase) {
         currentMotion = cmd;
 
         if (!connected) {
-            say(phrase + " El ESP32 todavía no está conectado.");
             currentMotion = "S";
+            say(phrase + " El ESP32 todavía no está conectado.");
             return;
         }
 
@@ -546,7 +661,9 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             return;
         }
 
-        status.setText("Buscando " + ROBOT_NAME + "...");
+        setStatus("Conectando ESP32");
+        if (eyesView != null) eyesView.setMode(EyesView.MODE_THINKING);
+
         io.execute(() -> {
             try {
                 BluetoothManager manager =
@@ -561,8 +678,9 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 BluetoothDevice target = null;
 
                 for (BluetoothDevice d : bonded) {
-                    String n = d.getName();
-                    if (n != null && n.equalsIgnoreCase(ROBOT_NAME)) {
+                    String name = d.getName();
+
+                    if (name != null && name.equalsIgnoreCase(ROBOT_NAME)) {
                         target = d;
                         break;
                     }
@@ -574,6 +692,7 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
 
                 BluetoothSocket socket =
                         target.createRfcommSocketToServiceRecord(SPP_UUID);
+
                 adapter.cancelDiscovery();
                 socket.connect();
 
@@ -586,22 +705,25 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
                 writeRobotDirect("S");
 
                 runOnUiThread(() -> {
-                    connectButton.setText("Desconectar");
-                    say("Conectada al ESP32. Ya puedo mover el robot.");
+                    if (eyesView != null) eyesView.setConnected(true);
+                    say("Conectada al ESP32.");
                 });
 
             } catch (Exception e) {
                 connected = false;
+
                 runOnUiThread(() -> {
-                    new AlertDialog.Builder(this)
-                            .setTitle("No se pudo conectar")
-                            .setMessage(e.getMessage() +
-                                    "\n\n1. Enciende el ESP32." +
-                                    "\n2. Ve a Ajustes > Bluetooth." +
-                                    "\n3. Empareja MARIA_ROBOT." +
-                                    "\n4. Regresa y toca Conectar ESP32.")
-                            .setPositiveButton("Entendido", null)
-                            .show();
+                    if (eyesView != null) {
+                        eyesView.setConnected(false);
+                        eyesView.setMode(EyesView.MODE_IDLE);
+                    }
+
+                    Toast.makeText(
+                            this,
+                            "No pude conectar MARIA_ROBOT. Empareja el ESP32 en Bluetooth.",
+                            Toast.LENGTH_LONG
+                    ).show();
+
                     scheduleVoiceRestart(700);
                 });
             }
@@ -609,7 +731,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     }
 
     private void writeRobotDirect(String cmd) throws IOException {
-        if (btOut == null) throw new IOException("Salida Bluetooth no disponible");
+        if (btOut == null) {
+            throw new IOException("Salida Bluetooth no disponible");
+        }
+
         btOut.write((cmd + "\n").getBytes());
         btOut.flush();
     }
@@ -623,9 +748,14 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             } catch (IOException e) {
                 connected = false;
                 currentMotion = "S";
+
                 runOnUiThread(() -> {
-                    connectButton.setText("Conectar ESP32");
-                    status.setText("Se perdió la conexión Bluetooth.");
+                    if (eyesView != null) {
+                        eyesView.setConnected(false);
+                        eyesView.setMode(EyesView.MODE_IDLE);
+                    }
+
+                    setStatus("Se perdió Bluetooth");
                     scheduleVoiceRestart(500);
                 });
             }
@@ -633,66 +763,98 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     }
 
     private void disconnectRobot() {
-        try { if (btOut != null) btOut.close(); } catch (Exception ignored) {}
-        try { if (btSocket != null) btSocket.close(); } catch (Exception ignored) {}
+        try {
+            if (btOut != null) btOut.close();
+        } catch (Exception ignored) {}
+
+        try {
+            if (btSocket != null) btSocket.close();
+        } catch (Exception ignored) {}
 
         btOut = null;
         btSocket = null;
         connected = false;
         currentMotion = "S";
 
-        if (connectButton != null) connectButton.setText("Conectar ESP32");
+        if (eyesView != null) {
+            eyesView.setConnected(false);
+            eyesView.setMode(EyesView.MODE_IDLE);
+        }
     }
 
     private void say(String text) {
         mariaSpeaking = true;
         voiceHandler.removeCallbacks(restartVoice);
 
+        if (eyesView != null) {
+            eyesView.setMode(EyesView.MODE_SPEAKING);
+        }
+
         if (recognizer != null && isListening) {
             try { recognizer.cancel(); } catch (Exception ignored) {}
             isListening = false;
         }
 
-        status.setText("María: " + text);
+        setStatus("María: " + text);
 
         if (tts != null) {
-            int result = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "maria");
+            int result = tts.speak(
+                    text,
+                    TextToSpeech.QUEUE_FLUSH,
+                    null,
+                    "maria"
+            );
+
             if (result == TextToSpeech.ERROR) {
                 mariaSpeaking = false;
+                if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
                 scheduleVoiceRestart(400);
             }
         } else {
             mariaSpeaking = false;
+            if (eyesView != null) eyesView.setMode(EyesView.MODE_IDLE);
             scheduleVoiceRestart(400);
         }
     }
 
     @Override public void onInit(int statusCode) {
         if (statusCode == TextToSpeech.SUCCESS && tts != null) {
-            int r = tts.setLanguage(new Locale("es", "MX"));
+            int result = tts.setLanguage(new Locale("es", "MX"));
             tts.setSpeechRate(0.95f);
 
-            if (r == TextToSpeech.LANG_MISSING_DATA ||
-                    r == TextToSpeech.LANG_NOT_SUPPORTED) {
+            if (result == TextToSpeech.LANG_MISSING_DATA ||
+                    result == TextToSpeech.LANG_NOT_SUPPORTED) {
                 tts.setLanguage(new Locale("es", "ES"));
             }
 
             tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override public void onStart(String utteranceId) {
                     mariaSpeaking = true;
+                    runOnUiThread(() -> {
+                        if (eyesView != null) eyesView.setMode(EyesView.MODE_SPEAKING);
+                    });
                 }
 
                 @Override public void onDone(String utteranceId) {
                     runOnUiThread(() -> {
                         mariaSpeaking = false;
-                        status.setText("🎤 María está escuchando...");
-                        scheduleVoiceRestart(350);
+
+                        if (eyesView != null) {
+                            eyesView.setMode(EyesView.MODE_LISTENING);
+                        }
+
+                        scheduleVoiceRestart(300);
                     });
                 }
 
                 @Override public void onError(String utteranceId) {
                     runOnUiThread(() -> {
                         mariaSpeaking = false;
+
+                        if (eyesView != null) {
+                            eyesView.setMode(EyesView.MODE_IDLE);
+                        }
+
                         scheduleVoiceRestart(350);
                     });
                 }
@@ -703,7 +865,10 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
     }
 
     @Override public void onRequestPermissionsResult(
-            int requestCode, String[] permissions, int[] grantResults) {
+            int requestCode,
+            String[] permissions,
+            int[] grantResults
+    ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
 
         if (requestCode == REQ_PERMS) {
@@ -714,12 +879,12 @@ public class MainActivity extends Activity implements TextToSpeech.OnInitListene
             Toast.makeText(
                     this,
                     micGranted
-                            ? "Micrófono autorizado. María ya está escuchando."
+                            ? "Micrófono autorizado. María está escuchando."
                             : "María necesita permiso de micrófono.",
                     Toast.LENGTH_SHORT
             ).show();
 
-            if (micGranted) scheduleVoiceRestart(500);
+            if (micGranted) scheduleVoiceRestart(400);
         }
     }
 
